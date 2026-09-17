@@ -414,3 +414,24 @@ test('sms wait aliases produce one canonical wait and deadline', () => {
   assert.equal(guidance.retryAt, now + 90000);
   assert.equal(store.registrationState.retryAt.sms, now + 90000);
 });
+
+
+test('a consent gate clears the consumed pending code', () => offline(async () => {
+  const store = createNewStore(PHONE);
+  store.codePending = true;
+  store.codeMethod = 'sms';
+  store.version = '2.26.36.74';
+  const calls = [];
+  await assert.rejects(
+    () => verifyCode(store, '123456', {
+      _registrationTransport: scriptedTransport([{
+        path: '/register',
+        response: { status: 'fail', reason: 'consent', pending: 'app_store_age' }
+      }], calls)
+    }),
+    /age-consent signal/
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(store.codePending, false);
+  assert.equal(store.codeMethod, null);
+}));
