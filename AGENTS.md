@@ -21,3 +21,5 @@
 - Keep raw sensitive evidence only in the operation-specific ignored directory when strictly necessary; the consolidated learning log must contain only sanitized conclusions and references to the private evidence location.
 - Distinguish protocol evidence from speculation. Never promote a hypothesis to a fact because a workaround appeared to help once; record the controlled comparison or state explicitly that causality remains unproven.
 - Reusable, non-sensitive learnings must also be converted into the appropriate tracked artifact (test, type, code comment, README/runbook, or changelog) and mirrored to the Bom Sucesso private ops area when its path is available.
+
+- A standing instruction such as “continue until success” grants autonomy only for read-only, offline, reversible implementation and validation work. It never replaces the per-attempt live-registration checklist and never authorizes cycling through accounts/SIMs, bulk OTP requests, cooldown bypass, or automatic retries. Every live `/code` still requires one exact authorized target/SIM and stops after its first terminal result.
