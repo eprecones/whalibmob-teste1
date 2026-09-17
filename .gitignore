@@ -9,3 +9,6 @@ package-lock.json
 # Private operational evidence and credentials (never commit)
 /storage/app/private/ops/
 /frida/android/server_with_dependencies.js
+
+# npm pack output — a build artifact of checking a release, never a source file
+*.tgz
