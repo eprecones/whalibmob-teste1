@@ -228,7 +228,8 @@ test('registration access id and normalized guidance survive a round-trip', () =
     eligibility: { wa_old: false, send_sms: true },
     retryAt: { sms: 1700003600000 },
     recommendedMethod: 'sms',
-    fallbackMethods: ['voice']
+    fallbackMethods: ['voice'],
+    consent: null
   });
 });
 

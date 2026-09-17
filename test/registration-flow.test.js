@@ -416,22 +416,60 @@ test('sms wait aliases produce one canonical wait and deadline', () => {
 });
 
 
-test('a consent gate clears the consumed pending code', () => offline(async () => {
+test('a consent gate clears the code and persists structured official-flow metadata', () => offline(async () => {
   const store = createNewStore(PHONE);
   store.codePending = true;
   store.codeMethod = 'sms';
   store.version = '2.26.36.74';
   const calls = [];
-  await assert.rejects(
-    () => verifyCode(store, '123456', {
+  let thrown = null;
+  try {
+    await verifyCode(store, '123456', {
       _registrationTransport: scriptedTransport([{
         path: '/register',
-        response: { status: 'fail', reason: 'consent', pending: 'app_store_age' }
+        response: {
+          status: 'fail',
+          reason: 'consent',
+          pending: 'app_store_age',
+          consent_id: 42,
+          consent_version: 3,
+          parent_consent_url: 'one-time-slug'
+        }
       }], calls)
-    }),
-    /age-consent signal/
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown);
+  assert.match(thrown.message, /official app-store age\/consent flow/);
+  assert.equal(thrown.consent.pending, 'app_store_age');
+  assert.equal(thrown.consent.consentId, 42);
+  assert.equal(thrown.consent.consentVersion, 3);
+  assert.equal(
+    thrown.consent.parentConsentUrl,
+    'https://whatsapp.com/parent_consent/one-time-slug'
   );
   assert.equal(calls.length, 1);
   assert.equal(store.codePending, false);
   assert.equal(store.codeMethod, null);
+  assert.deepEqual(store.registrationState.consent, {
+    pending: 'app_store_age',
+    reason: 'consent',
+    consentId: 42,
+    consentVersion: 3
+  });
+
+  const restored = storeFromJson(storeToJson(store));
+  assert.deepEqual(restored.registrationState.consent, store.registrationState.consent);
 }));
+
+test('a consent gate ignores a parent URL outside official WhatsApp HTTPS', () => {
+  const details = Registration._verify.consentGateDetails({
+    reason: 'consent',
+    pending: 'app_store_age',
+    parent_consent_url: 'https://example.invalid/parent_consent/token'
+  });
+  assert.equal(details.parentConsentUrl, null);
+  assert.equal(details.consentId, null);
+  assert.equal(details.consentVersion, null);
+});

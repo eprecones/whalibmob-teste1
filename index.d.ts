@@ -61,6 +61,13 @@ export interface DeviceConfig {
   [key: string]: any;
 }
 
+export interface RegistrationConsentState {
+  pending: string | null;
+  reason: string | null;
+  consentId: number | null;
+  consentVersion: number | null;
+}
+
 export interface RegistrationState {
   version: 1;
   /** The access-session id this guidance belongs to. */
@@ -72,6 +79,8 @@ export interface RegistrationState {
   retryAt: Partial<Record<'all' | 'sms' | 'voice' | 'wa_old' | 'flash' | 'email' | 'send_sms' | 'silent_auth', number>>;
   recommendedMethod: string | null;
   fallbackMethods: string[];
+  /** Persisted non-secret metadata for an official age/parent-consent gate. */
+  consent: RegistrationConsentState | null;
 }
 
 /**
@@ -1188,6 +1197,18 @@ export declare class WhalibmobClient extends EventEmitter {
 // Registration
 // ────────────────────────────────────────────────────────────────────────────
 
+export interface RegistrationConsentDetails extends RegistrationConsentState {
+  /** Official WhatsApp parent-consent URL, when supplied by the server. */
+  parentConsentUrl: string | null;
+}
+
+export interface RegistrationConsentError extends Error {
+  reason: 'consent' | string;
+  pending: string | null;
+  consent: RegistrationConsentDetails;
+  raw: RegistrationResult;
+}
+
 /** The raw server reply. Extra keys vary by outcome, so it is left open. */
 export interface RegistrationResult {
   status?: string;
@@ -1195,6 +1216,9 @@ export interface RegistrationResult {
   /** The number WhatsApp filed the account under; may differ from the one typed. */
   login?: string;
   pending?: string;
+  consent_id?: number;
+  consent_version?: number;
+  parent_consent_url?: string;
   /** Normalized server cooldown for the selected method, in seconds. */
   wait_seconds?: number;
   /** Absolute Unix epoch milliseconds when that cooldown expires. */

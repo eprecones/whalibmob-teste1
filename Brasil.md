@@ -2740,24 +2740,65 @@ if (probe.mismatch) {
 
 ## Quando o Registro É Recusado por Falta de Consentimento
 
-Alguns números voltam do `/register` assim:
+Um código correto pode ser aceito e consumido enquanto `/register` ainda
+responde:
 
 ```json
-{ "login": "557176034186", "pending": "app_store_age", "reason": "consent", "status": "fail" }
+{
+  "login": "<numero-canonico>",
+  "pending": "app_store_age",
+  "reason": "consent",
+  "status": "fail"
+}
 ```
 
-O código não foi recusado e a conta foi encontrada — o WhatsApp está pedindo um sinal de idade que só uma instalação real vinda da loja de apps carrega, e não vai concluir sem ele. Os números brasileiros são onde isso aparece na prática.
+Isso não é uma resposta de código errado e não se resolve pedindo outro código.
+O app Android oficial usa uma etapa separada em `/v2/consent`. Para
+`app_store_age`, ele obtém um resultado genuíno da API Google Play Age Signals
+e pode enviar limites/status de idade, data da última aprovação e install ID
+(ou um erro da API). Conforme a resposta, o app pode pedir uma data de
+nascimento real ou expor uma URL oficial de consentimento parental junto de
+`consent_id` e `consent_version` emitidos pelo servidor.
 
-A primeira coisa a tentar é o perfil de dispositivo Android. A requisição de registro do iOS carrega seis campos e nenhum deles diz nada sobre consentimento, termos ou idade; a do Android carrega `tos_version`, `education_screen_displayed` e `clicked_education_link`.
+O whalibmob **não** inventa esses valores nem automatiza a decisão de um
+responsável. `verifyCode()` limpa o código pendente já consumido e lança um erro
+estruturado:
 
-```sh
-WA_OS=android wa registration --code 5571976034186
+```js
+try {
+  await verifyCode(store, code)
+} catch (err) {
+  // Sempre persista o estado terminal. A CLI faz isso automaticamente.
+  saveStore(store, sessFile)
+
+  if (err.reason === 'consent') {
+    console.log(err.consent.pending)
+    console.log(err.consent.consentId)
+    console.log(err.consent.consentVersion)
+    // Mostre em UI confiável; nunca registre, persista ou compartilhe URL de uso único.
+    if (err.consent.parentConsentUrl) {
+      showParentConsentInTrustedUi(err.consent.parentConsentUrl)
+    }
+  }
+  throw err
+}
 ```
 
-Se isso também for recusado, o número precisa passar pelo app real uma vez, em um celular, antes de poder ser registrado aqui.
+A recuperação legítima é concluir idade/consentimento parental na instalação
+oficial da Play Store ou App Store. Depois que o app primário terminar o
+onboarding, vincule o whalibmob por companion pairing. Não reutilize o código
+submetido nem envie DOB, limites, status, install ID ou resultado de
+consentimento sintéticos.
+
+A [issue #6](https://github.com/Kunboruto20/whalibmob/issues/6) e o
+[PR #14](https://github.com/Kunboruto20/whalibmob/pull/14) do upstream apenas
+tornaram essa resposta inspecionável; eles não concluíram a etapa de
+consentimento. O Cobalt também não possui implementação de `app_store_age`.
 
 > [!NOTE]
-> O campo `login` naquela resposta vale ser lido. Os celulares brasileiros ganharam um nono dígito que o WhatsApp nunca adotou, então `+5571976034186` é arquivado como `+557176034186`. O whalibmob adota a forma do servidor automaticamente em um registro bem-sucedido e salva a sessão sob ela — a diferença de dígito não é, em si, a falha.
+> O campo `login` pode usar uma forma canônica diferente da digitada. O
+> whalibmob expõe essa forma sem tratar a diferença de dígitos como causa do
+> consentimento.
 
 ## O Push Token
 

@@ -2462,8 +2462,16 @@ async function handleLine(line) {
           const file  = storeFileFor(_sessDir, ph);
           const store = requirePendingRegistrationStore(loadStore(file));
           out('verifying...');
-          const r = await verifyCode(store, code,
-            Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
+          let r;
+          try {
+            r = await verifyCode(store, code,
+              Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
+          } catch (error) {
+            // verifyCode may consume the code and update terminal gate state
+            // before throwing (consent, captcha/2FA setup, expiry). Persist it.
+            saveStore(store, file);
+            throw error;
+          }
           if (r && (r.status === 'ok' || r.status === 'sent' || r.status === 'verified')) {
             sessionDirFor(_sessDir, ph, { create: true });
             const finalStore = r.store || store;
@@ -2562,9 +2570,15 @@ async function handleLine(line) {
             saveStore(store, sessFile);
             break;
           }
-          out('code received over push: ' + code + ' — confirming...');
-          const v = await verifyCode(store, code,
-            Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
+          out('code received over push — confirming...');
+          let v;
+          try {
+            v = await verifyCode(store, code,
+              Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
+          } catch (error) {
+            saveStore(store, sessFile);
+            throw error;
+          }
           if (v && (v.status === 'ok' || v.status === 'sent' || v.status === 'verified')) {
             const finalStore = v.store || store;
             finalStore.registered = true; finalStore.codePending = false;
@@ -3255,7 +3269,10 @@ async function main() {
         } else {
           out('  status  ' + (r && r.status ? r.status : JSON.stringify(r)));
         }
-      } catch (e) { fail(e.message); }
+      } catch (e) {
+        saveStore(store, file);
+        fail(e.message);
+      }
       out('\nstaying in shell — type /connect ' + ph + ' to start chatting');
       openShell(); _rl.prompt();
       return;
