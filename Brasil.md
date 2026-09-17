@@ -2693,20 +2693,20 @@ Use duas instâncias de `WhalibmobClient` se quiser os dois ao mesmo tempo.
 
 ## O Número sob o Qual o WhatsApp Arquiva sua Conta
 
-O WhatsApp nem sempre guarda uma conta sob o número que você digita. Os celulares brasileiros são o exemplo clássico: eles ganharam um nono dígito, e o WhatsApp mantém as contas mais antigas na forma de oito dígitos. `5596976042705` e `559676042705` são a mesma conta, mas só o segundo é o que o servidor reconhece.
+O WhatsApp nem sempre guarda uma conta sob o número que você digita. Os celulares brasileiros são o exemplo clássico: eles ganharam um nono dígito, e o WhatsApp pode manter contas antigas na forma canônica anterior embora o aparelho mostre a forma nova.
 
 Isso importa porque o número que está na sua sessão é enviado como nome de usuário em toda conexão. Erre a forma e o servidor não terá nenhum registro correspondente, então o login é recusado com `401` — um código que diz "desconectado" e não dá nenhuma pista de que o número era o problema.
 
 O whalibmob resolve isso sozinho, nos dois sentidos:
 
-**Quando você registra**, a forma canônica é lida da resposta do servidor e a sessão é salva sob ela. Números registrados pelo whalibmob não podem terminar nesse estado.
+**Quando você registra**, a forma canônica é lida da resposta do servidor. A CLI prova que as Stores pendente e final têm a mesma identidade imutável, grava e relê a Store canônica e só então remove o arquivo exato de autenticação pendente. Arquivos companion, Signal, pre-key, cache, histórico, app-state e desconhecidos nunca são sobrescritos ou apagados por esse finalizador; uma colisão ou layout ambíguo interrompe tudo com a Store original intacta.
 
 **Quando você conecta** uma sessão antiga que está nesse estado, o primeiro login é recusado, o whalibmob pergunta ao servidor qual forma ele usa, re-arquiva a sessão e conecta. Você vê uma linha:
 
-```
-connecting to +5596976042705...
-  this account is registered as +559676042705 (not +5596976042705) — session updated
-connected as +559676042705
+```text
+conectando a <numero-digitado>...
+  esta conta está registrada sob <numero-canonico> — sessão atualizada
+conectado sob <numero-canonico>
 ```
 
 A renomeação preserva o registro e as chaves Signal — ela move os arquivos da sessão, não registra nada de novo.
@@ -2727,8 +2727,8 @@ Assim o `401` é lançado como está, e o `checkSessionAlive()` te diz como o se
 
 ```js
 const probe = await client.checkSessionAlive()
-// { alive: true, status: 'ok', current: '5596976042705',
-//   canonical: '559676042705', mismatch: true }
+// { alive: true, status: 'ok', current: '<numero-digitado>',
+//   canonical: '<numero-canonico>', mismatch: true }
 
 if (probe.mismatch) {
   await client.adoptCanonicalNumber(probe.canonical)

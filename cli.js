@@ -65,6 +65,7 @@ const {
   requirePendingRegistrationStore,
   resolveRegistrationStoreOptions
 } = require('./tools/CliOptions');
+const { finalizeCanonicalRegistration } = require('./tools/CanonicalRegistration');
 const { defaultBaseDir, sessionDirFor, storeFileFor, webStoreFileFor,
         listSessions, migrateSession, isLegacyLayout } = require('./lib/SessionPaths');
 
@@ -2473,15 +2474,15 @@ async function handleLine(line) {
             throw error;
           }
           if (r && (r.status === 'ok' || r.status === 'sent' || r.status === 'verified')) {
-            sessionDirFor(_sessDir, ph, { create: true });
             const finalStore = r.store || store;
             finalStore.registered  = true;
             finalStore.codePending = false;
-            // Save under the number WhatsApp filed the account as, not the one
-            // that was typed — they differ often enough to matter.
-            const savedPhone = String(finalStore.phoneNumber || ph);
-            const savedFile  = storeFileFor(_sessDir, savedPhone);
-            saveStore(finalStore, savedFile);
+            // Finalize the auth Store transactionally: prove identity, write
+            // and reload the canonical destination, then remove only the exact
+            // pending source Store. Auxiliary/companion files are untouched.
+            const finalized = finalizeCanonicalRegistration(_sessDir, ph, finalStore);
+            const savedPhone = finalized.phoneNumber;
+            const savedFile  = finalized.storeFile;
             if (r.canonicalPhoneNumber) {
               out('note: WhatsApp knows this account as +' + r.canonicalPhoneNumber +
                   ', not +' + r.typedPhoneNumber);
@@ -2582,8 +2583,8 @@ async function handleLine(line) {
           if (v && (v.status === 'ok' || v.status === 'sent' || v.status === 'verified')) {
             const finalStore = v.store || store;
             finalStore.registered = true; finalStore.codePending = false;
-            const savedPhone = String(finalStore.phoneNumber || ph);
-            saveStore(finalStore, storeFileFor(_sessDir, savedPhone));
+            const finalized = finalizeCanonicalRegistration(_sessDir, ph, finalStore);
+            const savedPhone = finalized.phoneNumber;
             out('registered via push  session saved');
             out('now run: /connect ' + savedPhone);
           } else {
@@ -3245,20 +3246,20 @@ async function main() {
       const file  = storeFileFor(_sessDir, ph);
       const store = requirePendingRegistrationStore(loadStore(file));
       out('verifying code for +' + ph + '...');
+      let verificationCompleted = false;
       try {
         const r = await verifyCode(store, code,
           Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
+        verificationCompleted = true;
         if (r && (r.status === 'ok' || r.status === 'sent' || r.status === 'verified')) {
-          if (!fs.existsSync(_sessDir)) fs.mkdirSync(_sessDir, { recursive: true });
           const finalStore = r.store || store;
           finalStore.registered  = true;
           finalStore.codePending = false;
           // The account can come back filed under a different form of the
-          // number, and that is the one the session belongs to.
-          const savedPhone = String(finalStore.phoneNumber || ph);
-          sessionDirFor(_sessDir, savedPhone, { create: true });
-          const savedFile  = storeFileFor(_sessDir, savedPhone);
-          saveStore(finalStore, savedFile);
+          // number; use the same identity-proving finalizer as the shell.
+          const finalized = finalizeCanonicalRegistration(_sessDir, ph, finalStore);
+          const savedPhone = finalized.phoneNumber;
+          const savedFile  = finalized.storeFile;
           if (r.canonicalPhoneNumber) {
             out('note: WhatsApp knows this account as +' + r.canonicalPhoneNumber +
                 ', not +' + r.typedPhoneNumber);
@@ -3270,7 +3271,10 @@ async function main() {
           out('  status  ' + (r && r.status ? r.status : JSON.stringify(r)));
         }
       } catch (e) {
-        saveStore(store, file);
+        // Persist terminal verification state only when verifyCode itself
+        // failed. A canonical-finalization failure must leave the original
+        // pending Store untouched as the recovery point.
+        if (!verificationCompleted) saveStore(store, file);
         fail(e.message);
       }
       out('\nstaying in shell — type /connect ' + ph + ' to start chatting');

@@ -2695,20 +2695,20 @@ Use two `WhalibmobClient` instances if you want both at once.
 
 ## The Number WhatsApp Files Your Account Under
 
-WhatsApp does not always keep an account under the number you type. Brazilian mobiles are the standing example: they gained a ninth digit, and WhatsApp keeps older accounts under the eight-digit form. `5596976042705` and `559676042705` are the same account, but only the second is the one the server recognises.
+WhatsApp does not always keep an account under the number you type. Brazilian mobiles are the standing example: they gained a ninth digit, and WhatsApp can keep older accounts under the prior canonical form even though the handset displays the newer one.
 
 This matters because the number in your session is sent as the username on every connection. Get the form wrong and the server has no registration matching it, so the login is refused with `401` — a code that says "logged out" and gives no hint that the number was the problem.
 
 whalibmob handles this on its own, in both directions:
 
-**When you register**, the canonical form is read from the server's reply and the session is saved under it. Numbers registered through whalibmob cannot end up in this state.
+**When you register**, the canonical form is read from the server's reply. The CLI proves that the pending and final Stores have the same immutable identity, writes and reloads the canonical Store, and only then removes the exact pending auth file. Existing companion, Signal, pre-key, cache, history, app-state and unknown files are never overwritten or deleted by this finalizer; a collision or ambiguous layout stops with the original Store intact.
 
 **When you connect** an older session that is in this state, the first login is refused, whalibmob asks the server which form it uses, re-files the session, and connects. You see one line:
 
-```
-connecting to +5596976042705...
-  this account is registered as +559676042705 (not +5596976042705) — session updated
-connected as +559676042705
+```text
+connecting to <typed-number>...
+  this account is registered under <canonical-number> — session updated
+connected under <canonical-number>
 ```
 
 The rename keeps the registration and the Signal keys — it moves the session files, it does not re-register anything.
@@ -2729,8 +2729,8 @@ Then the `401` is thrown as-is, and `checkSessionAlive()` tells you what the ser
 
 ```js
 const probe = await client.checkSessionAlive()
-// { alive: true, status: 'ok', current: '5596976042705',
-//   canonical: '559676042705', mismatch: true }
+// { alive: true, status: 'ok', current: '<typed-number>',
+//   canonical: '<canonical-number>', mismatch: true }
 
 if (probe.mismatch) {
   await client.adoptCanonicalNumber(probe.canonical)
