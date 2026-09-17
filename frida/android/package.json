@@ -6,12 +6,12 @@
   "main": "demo.js",
   "scripts": {
     "prepare": "npm run build",
-    "build": "frida-compile server.js -o server_with_dependencies.js -c",
+    "build": "frida-compile server.js -o server_with_dependencies.js",
     "watch": "frida-compile server.js -o server_with_dependencies.js -w"
   },
   "devDependencies": {
     "@types/frida-gum": "^18.5.1",
     "@types/node": "^18.19.3",
-    "frida-compile": "^16.4.1"
+    "frida-compile": "16.4.1"
   }
 }

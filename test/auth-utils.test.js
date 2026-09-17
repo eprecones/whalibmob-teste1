@@ -295,3 +295,14 @@ test('initAuthCreds produces a store that can be registered', () => {
   assert.ok(Buffer.isBuffer(store.noiseKeyPair.private));
   assert.ok(store.registrationId > 0);
 });
+
+
+test('initAuthCreds preserves the actual SIM network overrides', () => {
+  const store = initAuthCreds('40711111111', {
+    name: 'Ana',
+    simMcc: '226',
+    simMnc: '01'
+  });
+  assert.equal(store.simMcc, '226');
+  assert.equal(store.simMnc, '01');
+});

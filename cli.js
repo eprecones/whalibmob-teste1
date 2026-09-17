@@ -52,7 +52,6 @@ const {
   requestSmsCode,
   verifyCode,
   assertRegistrationKeys,
-  fetchWaVersion,
   getDeviceConfig,
   createNewStore,
   saveStore,
@@ -60,6 +59,12 @@ const {
 } = require('./lib/Client');
 
 const { assertMeId, initAuthCreds } = require('./lib/auth-utils');
+const {
+  resolvePlatformOption,
+  hasFreshRegistrationPreflight,
+  requirePendingRegistrationStore,
+  resolveRegistrationStoreOptions
+} = require('./tools/CliOptions');
 const { defaultBaseDir, sessionDirFor, storeFileFor, webStoreFileFor,
         listSessions, migrateSession, isLegacyLayout } = require('./lib/SessionPaths');
 
@@ -504,6 +509,74 @@ function printCodeNextSteps(store, phone, confirmCmd) {
   out('  run: ' + confirmCmd + ' <code>');
 }
 
+function printRegistrationResponse(result) {
+  const status = result && result.status ? String(result.status) : 'unknown';
+  out('  status  ' + status);
+  if (result && result.reason) out('  reason  ' + result.reason);
+  if (result && result.param)  out('  param   ' + result.param);
+  if (result && result.pending) out('  pending ' + result.pending);
+  if (result && Number(result.wait_seconds) > 0) {
+    out('  wait    ' + result.wait_seconds + ' seconds' +
+      (result.method ? ' (' + result.method + ')' : ''));
+    if (Number(result.retry_at) > 0) {
+      out('  retry_at ' + new Date(Number(result.retry_at)).toISOString());
+    }
+  } else if (result && result.retry_after != null) {
+    out('  retry_after ' + result.retry_after);
+  }
+  if (result && result.local) out('  source  local guard (no request sent)');
+  if (result && result.custom_block_screen) {
+    const block = result.custom_block_screen;
+    if (block.title) out('  block   ' + block.title);
+    if (block.body)  out('          ' + block.body);
+  }
+  return status === 'sent' || status === 'ok';
+}
+
+async function prepareRegistrationStore(phone, sessionFile, options) {
+  options = typeof options === 'string' ? { name: options } : (options || {});
+  let store = loadStore(sessionFile);
+  if (!store) {
+    store = initAuthCreds(phone, options);
+    saveStore(store, sessionFile);
+  } else if (!store.codePending) {
+    if (options.simMcc !== undefined && options.simMcc !== null) {
+      store.simMcc = String(options.simMcc).trim();
+    }
+    if (options.simMnc !== undefined && options.simMnc !== null) {
+      store.simMnc = String(options.simMnc).trim();
+    }
+    saveStore(store, sessionFile);
+  }
+
+  if (store.codePending) return store;
+  if (store.registered) {
+    throw new Error('this session is already registered; it cannot request another onboarding code');
+  }
+  if (hasFreshRegistrationPreflight(store)) return store;
+
+  async function preflight(candidate) {
+    out('checking device keys...');
+    try {
+      return await assertRegistrationKeys(candidate, undefined);
+    } finally {
+      // Eligibility and waits belong to this exact access_session_id and must
+      // survive even when the preflight refuses to proceed.
+      saveStore(candidate, sessionFile);
+    }
+  }
+
+  if (await preflight(store)) return store;
+
+  out('  device keys already registered — generating and checking new keys...');
+  store = initAuthCreds(phone, options);
+  saveStore(store, sessionFile);
+  if (!await preflight(store)) {
+    throw new Error('new registration keys were unexpectedly already registered');
+  }
+  return store;
+}
+
 function normalizeJid(s) {
   if (!s) return null;
   s = String(s);
@@ -660,7 +733,7 @@ const HELP = `
     /biz <phone|jid>                                 query business profile
 
   Registration
-    /reg check   <phone>                              check if number has WhatsApp
+    /reg check   <phone>                              run /exist identity preflight (never sends a code)
     /reg code    <phone> [sms|voice|wa_old]           request verification code
     /reg code    <phone> email <address>              request code via email
     /reg push    <phone> [sms|voice]                  request code and receive it over Firebase push
@@ -2324,16 +2397,29 @@ async function handleLine(line) {
       // ── registration ───────────────────────────────────────────────────────
 
       case '/reg': {
-        // --name is pulled out before anything reads a position, so the phone
-        // and the code stay where the usage lines say they are no matter where
-        // the flag was typed. A name with spaces needs quoting: --name "A B".
+        // Registration options are pulled out before anything reads a
+        // positional argument, so they can be typed anywhere in the command.
         const regName = takeFlag(p, '--name');
+        const hasSimMcc = p.includes('--sim-mcc');
+        const hasSimMnc = p.includes('--sim-mnc');
+        const simMcc = takeFlag(p, '--sim-mcc');
+        const simMnc = takeFlag(p, '--sim-mnc');
+        let regStoreOptions;
+        try {
+          regStoreOptions = resolveRegistrationStoreOptions({
+            'sim-mcc': hasSimMcc ? (simMcc === null ? true : simMcc) : undefined,
+            'sim-mnc': hasSimMnc ? (simMnc === null ? true : simMnc) : undefined
+          }, regName);
+        } catch (error) {
+          fail(error.message);
+          break;
+        }
         const sub = p[1] && p[1].toLowerCase();
 
         if (sub === 'check') {
           const ph = normalizePhone(p[2]);
           if (!ph) { fail('usage: /reg check <phone>'); break; }
-          out('checking...');
+          out('running registration identity preflight (no code will be sent)...');
           const r = await checkNumberStatus(ph);
           out('  status  ' + r.status);
           if (r.note) out('  note    ' + r.note);
@@ -2344,7 +2430,7 @@ async function handleLine(line) {
           // email method: /reg code <phone> email <address>
           const emailAddr = method === 'email' ? (p[4] || '') : '';
           if (!ph) {
-            fail('usage: /reg code <phone> [sms|voice|wa_old|flash|email <address>] [--name "Your Name"]');
+            fail('usage: /reg code <phone> [sms|voice|wa_old|flash|email <address>] [--name "Your Name"] [--sim-mcc <code> --sim-mnc <code>]');
             out('  --name sets the display name the account registers with — what people');
             out('  who have not saved your number see. It can be changed later with /name.');
             break;
@@ -2355,39 +2441,26 @@ async function handleLine(line) {
           }
           sessionDirFor(_sessDir, ph, { create: true });
           const sessFile = storeFileFor(_sessDir, ph);
-          let store = loadStore(sessFile);
-          if (!store) {
-            store = initAuthCreds(ph, { name: regName });
-            saveStore(store, sessFile);
-          } else if (!store.codePending && !store.registered) {
-            // Only check /exist when keys were never used to request a code.
-            out('checking device keys...');
-            const waVersion = await fetchWaVersion(getDeviceConfig());
-            const fresh = await assertRegistrationKeys(store, waVersion);
-            if (!fresh) {
-              out('  device keys already registered — generating new keys...');
-              store = initAuthCreds(ph, { name: regName });
-              saveStore(store, sessFile);
-              out('  new keys saved — proceed with code below');
-            }
-          }
+          const store = await prepareRegistrationStore(ph, sessFile, regStoreOptions);
           const methodLabel = method === 'email' ? ('email → ' + emailAddr) : method;
           out('requesting ' + methodLabel + ' code for +' + ph + '...');
           const codeOpts = Object.assign(method === 'email' ? { email: emailAddr } : {},
             { onProgress: out, name: regName });
           if (regName) out('  registering as "' + (store.name || regName) + '"');
           const r = await requestSmsCode(store, method, codeOpts);
-          store.codePending = true;
           saveStore(store, sessFile);
-          out('  status  ' + (r && r.status));
-          printCodeNextSteps(store, ph, '/reg confirm ' + ph);
+          if (printRegistrationResponse(r)) {
+            printCodeNextSteps(store, ph, '/reg confirm ' + ph);
+          } else {
+            out('  no verification code was accepted for delivery; do not confirm or retry automatically');
+          }
         }
         else if (sub === 'confirm') {
           const ph   = normalizePhone(p[2]);
           const code = p[3];
           if (!ph || !code) { fail('usage: /reg confirm <phone> <code> [--name "Your Name"]'); break; }
           const file  = storeFileFor(_sessDir, ph);
-          const store = loadStore(file) || initAuthCreds(ph, { name: regName });
+          const store = requirePendingRegistrationStore(loadStore(file));
           out('verifying...');
           const r = await verifyCode(store, code,
             Object.assign(registrationPrompts(), { onProgress: out, name: regName }));
@@ -2435,8 +2508,7 @@ async function handleLine(line) {
 
           sessionDirFor(_sessDir, ph, { create: true });
           const sessFile = storeFileFor(_sessDir, ph);
-          let store = loadStore(sessFile);
-          if (!store) { store = initAuthCreds(ph, { name: regName }); saveStore(store, sessFile); }
+          const store = await prepareRegistrationStore(ph, sessFile, regStoreOptions);
           if (!store.device) store.device = getDeviceConfig();
 
           // Push verification needs a push line, and only Android has one here.
@@ -2476,9 +2548,11 @@ async function handleLine(line) {
 
           out('requesting ' + method + ' code for +' + ph + '...');
           const r = await requestSmsCode(store, method, { onProgress: out, name: regName });
-          store.codePending = true;
           saveStore(store, sessFile);
-          out('  status  ' + (r && r.status));
+          if (!printRegistrationResponse(r)) {
+            out('  no verification code was accepted for delivery; push wait skipped');
+            break;
+          }
 
           out('waiting for the code over push (up to 3 min; Ctrl-C to stop and use /reg confirm)...');
           const code = await codePromise;
@@ -2722,9 +2796,9 @@ usage:
   wa connect <phone>                        connect and open interactive shell
   wa pair    <phone> [code]                 link to an existing account (8-digit code)
   wa listen  <phone>                        connect and listen (stay-alive)
-  wa registration --request-code <phone> [--name "Your Name"]
+  wa registration --request-code <phone> [--name "Your Name"] [--sim-mcc <code> --sim-mnc <code>]
   wa registration --register <phone> --code <code> [--name "Your Name"]
-  wa registration --check <phone>
+  wa registration --check <phone>                    run /exist identity preflight; never sends a code
   wa apk-material <base.apk> [split.apk ...]  read the Android token material
   wa apk-material --download                  fetch that APK from Google Play
   wa refresh-version <phone>                  update the version a session announces
@@ -2733,7 +2807,11 @@ usage:
 
 options:
   --session <dir>   authentication folder (default: remembered, else ~/.waSession)
+  --platform <os>   iphone | ios | android; applies before creating a new session
+  --iphone, --ios   shorthand for --platform ios
+  --android         shorthand for --platform android
   --out <file>      where apk-material writes  (default: <session dir>/android-apk-material.json)
+  --density <dpi>   density for manual multi-split APKs (e.g. 420 or xxhdpi)
   --sms             connect by registering this number over SMS
   --pair            connect by linking to an existing account (8-digit code)
   --method          sms | voice | wa_old | flash | email  (default: sms)
@@ -2751,6 +2829,8 @@ debug:
   --debug           trace without asking  (same as WA_DEBUG=1)
   --no-debug, -q    stay quiet without asking  (same as WA_DEBUG=0)
   --name <text>     display name to register with (registration commands only)
+  --sim-mcc <code>  actual SIM mobile country code for a new registration store
+  --sim-mnc <code>  actual SIM network code; preserve two/three-digit width
   --trace-bytes     also dump the raw encoded bytes of every stanza
 
 after connecting, type /help for all available commands.
@@ -2827,6 +2907,17 @@ function askDonation(cmd) {
 
 async function main() {
   const { cmd, sub, flags, pos } = parseArgs(process.argv);
+
+  // Command-line platform selection is only a convenience facade over WA_OS.
+  // Resolve every spelling together so --platform ios --android is rejected
+  // rather than silently letting the long form win.
+  try {
+    const requestedPlatform = resolvePlatformOption(flags);
+    if (requestedPlatform) process.env.WA_OS = requestedPlatform;
+  } catch (err) {
+    fail(err.message);
+    process.exit(1);
+  }
 
   // The authentication folder first: it decides where everything this run
   // touches lives, and asking it after the other two made the answer to the
@@ -3005,7 +3096,9 @@ async function main() {
           packageName: flags.business ? 'com.whatsapp.w4b' : 'com.whatsapp',
           onProgress:  (m) => out('  ' + m)
         });
-        material = AndroidApk.extractMaterial(apk.base, apk.splits);
+        material = AndroidApk.extractMaterial(apk.base, apk.splits, {
+          densityDpi: apk.densityDpi
+        });
         // The catalogue's version is the authority when the manifest has none.
         if (!material.apkVersion)     material.apkVersion     = apk.versionName;
         if (!material.apkVersionCode) material.apkVersionCode = apk.versionCode;
@@ -3014,7 +3107,8 @@ async function main() {
         out('reading ' + basePath + '...');
         material = AndroidApk.extractMaterial(
           fs.readFileSync(basePath),
-          splitPaths.map(p => ({ name: path.basename(p), data: fs.readFileSync(p) }))
+          splitPaths.map(p => ({ name: path.basename(p), data: fs.readFileSync(p) })),
+          { density: flags.density }
         );
       }
       if (flags.version) material.apkVersion = String(flags.version);
@@ -3045,7 +3139,7 @@ async function main() {
       if (material.apkVersion) {
         out('  Registration will announce ' + material.apkVersion + ' from now on, because the');
         out('  token is signed over this APK — the live Play Store version would name a');
-        out('  different build. WA_VERSION still overrides it.');
+        out('  different build. A conflicting WA_VERSION is refused during Android registration.');
       } else {
         out('  The manifest carries no versionName, so the live Play Store version will be');
         out('  announced. If that does not match this APK, pass --version or set WA_VERSION.');
@@ -3067,7 +3161,7 @@ async function main() {
     const phone = normalizePhone(rawPhone);
 
     if (flags.check !== undefined) {
-      out('checking +' + phone + '...');
+      out('preflighting registration identity for +' + phone + ' (no code will be sent)...');
       try {
         const r = await checkNumberStatus(phone);
         out('  status  ' + r.status);
@@ -3093,43 +3187,37 @@ async function main() {
       sessionDirFor(_sessDir, ph, { create: true });
       const sessFile = storeFileFor(_sessDir, ph);
       const regName = typeof flags.name === 'string' ? flags.name : null;
-      let store = loadStore(sessFile);
-      if (!store) {
-        // Brand new — generate fresh keys, save immediately, no need to check /exist
-        store = initAuthCreds(ph, { name: regName });
-        saveStore(store, sessFile);
-      } else if (!store.codePending && !store.registered) {
-        // Existing store but code was never sent and not registered — check if
-        // keys are already taken (e.g. leftover from a previous failed attempt).
-        // FIX: only 1 /exist call now (was 2), and skipped entirely when codePending.
-        out('checking device keys...');
-        const waVersion = await fetchWaVersion(getDeviceConfig());
-        const fresh = await assertRegistrationKeys(store, waVersion);
-        if (!fresh) {
-          out('  device keys already registered — generating new keys...');
-          store = initAuthCreds(ph, { name: regName });
-          saveStore(store, sessFile);
-        }
+      let regStoreOptions;
+      try {
+        regStoreOptions = resolveRegistrationStoreOptions(flags, regName);
+      } catch (error) {
+        fail(error.message);
+        process.exit(1);
       }
+      const store = await prepareRegistrationStore(ph, sessFile, regStoreOptions);
       // If store.codePending === true, keys were already accepted by WhatsApp in a
       // prior /code request — reuse the exact same store without any /exist call.
       const methodLabel = method === 'email' ? ('email → ' + emailAddr) : method;
       out('requesting ' + methodLabel + ' code for +' + ph + '...');
+      let codeAccepted = false;
       try {
         const codeOpts = Object.assign(method === 'email' ? { email: emailAddr } : {},
           { onProgress: out, name: regName });
         if (regName) out('  registering as "' + (store.name || regName) + '"');
         const r = await requestSmsCode(store, method, codeOpts);
-        store.codePending = true;
         saveStore(store, sessFile);
-        out('  status  ' + (r && r.status));
-        if (r && (r.status === 'sent' || r.status === 'ok')) {
+        codeAccepted = printRegistrationResponse(r);
+        if (codeAccepted) {
           printCodeNextSteps(store, ph, 'wa registration --register ' + ph + ' --code');
+        } else {
+          out('  no verification code was accepted for delivery; do not confirm or retry automatically');
         }
       } catch (e) {
         out('  ' + (e.message || String(e)));
       }
-      out('\nstaying in shell — use /reg confirm ' + ph + ' <code> to complete');
+      out(codeAccepted
+        ? '\nstaying in shell — use /reg confirm ' + ph + ' <code> to complete'
+        : '\nstaying in shell — inspect the reason above before another request');
       openShell(); _rl.prompt();
       return;
     }
@@ -3141,7 +3229,7 @@ async function main() {
       if (!code) { fail('--code is required');    process.exit(1); }
       const regName = typeof flags.name === 'string' ? flags.name : null;
       const file  = storeFileFor(_sessDir, ph);
-      const store = loadStore(file) || initAuthCreds(ph, { name: regName });
+      const store = requirePendingRegistrationStore(loadStore(file));
       out('verifying code for +' + ph + '...');
       try {
         const r = await verifyCode(store, code,

@@ -29,15 +29,10 @@ export type Jid = string;
 export type MediaSource = string | Buffer | Uint8Array;
 
 /** Delivery method for a verification code. */
-export type CodeMethod = 'sms' | 'voice' | 'wa_old' | 'flash';
+export type CodeMethod = 'sms' | 'voice' | 'wa_old' | 'flash' | 'email';
 
-/** Result of a number-status lookup. */
-export type NumberStatus =
-  | 'registered'
-  | 'registered_blocked'
-  | 'not_registered'
-  | 'cooldown'
-  | 'unknown';
+/** Result of the side-effect-safe `/exist` registration-identity preflight. */
+export type NumberStatus = 'registration_identity_preflight';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Store / device
@@ -66,6 +61,19 @@ export interface DeviceConfig {
   [key: string]: any;
 }
 
+export interface RegistrationState {
+  version: 1;
+  /** The access-session id this guidance belongs to. */
+  accessSessionId: string;
+  checkedAt: number;
+  preflight: 'fresh' | 'registered' | 'unknown';
+  eligibility: Partial<Record<'wa_old' | 'send_sms' | 'silent_auth' | 'sms' | 'voice' | 'flash' | 'email_otp', boolean>>;
+  /** Absolute Unix epoch milliseconds; `all` applies to every method. */
+  retryAt: Partial<Record<'all' | 'sms' | 'voice' | 'wa_old' | 'flash' | 'email' | 'send_sms' | 'silent_auth', number>>;
+  recommendedMethod: string | null;
+  fallbackMethods: string[];
+}
+
 /**
  * A registered (SMS / mobile) session, **in memory** — what `createNewStore`,
  * `initAuthCreds`, `loadStore` and `storeFromJson` hand back.
@@ -88,6 +96,12 @@ export interface WhalibmobStore {
   /** A UUID string, not bytes. */
   advertisingId: string;
   backupToken: Buffer;
+  /** Stable UUID-v4 bytes encoded as 22-character base64url for one registration flow. */
+  _accessSessionId?: string;
+  /** Normalized `/exist` eligibility and `/code` cooldowns for this access session. */
+  registrationState?: RegistrationState | null;
+  /** Delivery channel that produced the pending code. */
+  codeMethod?: CodeMethod | null;
   /** `true` once `verifyCode` has succeeded. */
   registered: boolean;
   /** `true` between requesting a code and confirming it. */
@@ -866,6 +880,13 @@ export interface WhalibmobEvents {
 export declare class WhalibmobClient extends EventEmitter {
   constructor(opts?: WhalibmobClientOptions);
 
+  /** Create/reuse a registration store and run the `/exist` identity preflight. */
+  static register(phoneNumberOrStore: string | WhalibmobStore, opts?: RegistrationOptions): Promise<RegistrationResult & { store: WhalibmobStore }>;
+  /** Request a code using the same store returned by `register()`. */
+  static requestCode(storeOrResult: WhalibmobStore | { store: WhalibmobStore }, method?: CodeMethod, opts?: RegistrationOptions): Promise<RegistrationResult>;
+  /** Confirm a code using the same registration store. */
+  static confirmCode(storeOrResult: WhalibmobStore | { store: WhalibmobStore }, code: string, opts?: RegistrationOptions): Promise<RegistrationResult>;
+
   on<E extends keyof WhalibmobEvents>(event: E, listener: WhalibmobEvents[E]): this;
   once<E extends keyof WhalibmobEvents>(event: E, listener: WhalibmobEvents[E]): this;
   off<E extends keyof WhalibmobEvents>(event: E, listener: WhalibmobEvents[E]): this;
@@ -1174,6 +1195,12 @@ export interface RegistrationResult {
   /** The number WhatsApp filed the account under; may differ from the one typed. */
   login?: string;
   pending?: string;
+  /** Normalized server cooldown for the selected method, in seconds. */
+  wait_seconds?: number;
+  /** Absolute Unix epoch milliseconds when that cooldown expires. */
+  retry_at?: number;
+  /** `true` when a local eligibility/cooldown guard prevented any request. */
+  local?: boolean;
   /**
    * Set only when the server's number differs from the one typed. Callers
    * should use `result.store || store` — the CLI does — because a plain
@@ -1188,6 +1215,14 @@ export interface RegistrationResult {
 export interface RegistrationOptions {
   /** Display name the account announces. Trimmed and capped at 25 characters. */
   name?: string;
+  /** Address required when `method` is `email`. */
+  email?: string;
+  /** Retry one unknown `/code` response once. Default `false`. */
+  retryUnknown?: boolean;
+  /** Permit one explicit delivery-channel fallback after `no_routes`. Default `false`. */
+  allowMethodFallback?: boolean;
+  /** Require Frida `/info` to confirm the installed Android APK version. Default `false`. */
+  requireInstalledApkMatch?: boolean;
   /** Called when the server answers with a CAPTCHA. Return the answer, or `null` to give up. */
   solveCaptcha?: (challenge: { image: Buffer | null; audio: Buffer | null }) => Promise<string | null>;
   /** Called when the account has two-step verification on. Return the six-digit PIN. */
@@ -1198,22 +1233,30 @@ export interface RegistrationOptions {
 
 export declare function requestSmsCode(store: WhalibmobStore, method?: CodeMethod, opts?: RegistrationOptions): Promise<RegistrationResult>;
 export declare function verifyCode(store: WhalibmobStore, code: string, opts?: RegistrationOptions): Promise<RegistrationResult>;
-export declare function checkIfRegistered(store: WhalibmobStore): Promise<RegistrationResult>;
+export declare function checkIfRegistered(store: WhalibmobStore, opts?: RegistrationOptions): Promise<RegistrationResult>;
 
 export interface NumberStatusResult {
-  active: boolean | null;
-  usable: boolean | null;
+  /** Always `null`: `/exist` is not a public phone-number existence query. */
+  active: null;
+  /** Always `null`: no account usability conclusion is made. */
+  usable: null;
   status: NumberStatus;
   note: string;
+  preflight: RegistrationResult;
+  store: WhalibmobStore;
 }
-export declare function checkNumberStatus(phoneNumber: string): Promise<NumberStatusResult>;
+export declare function checkNumberStatus(phoneNumber: string, opts?: RegistrationOptions): Promise<NumberStatusResult>;
 
 /** Firebase push listener. Resolves `null` on timeout, or immediately on iOS. */
 export declare function receivePushCode(store: WhalibmobStore, device?: DeviceConfig, opts?: { timeoutMs?: number }): Promise<string | null>;
 /** Whether this device profile can do push verification at all. */
 export declare function supportsPush(device: DeviceConfig): boolean;
 
-export declare function assertRegistrationKeys(store: WhalibmobStore): void;
+export declare function assertRegistrationKeys(
+  store: WhalibmobStore,
+  waVersion?: string,
+  opts?: RegistrationOptions
+): Promise<boolean>;
 
 // ─── Version ────────────────────────────────────────────────────────────────
 export declare function fetchWaVersion(device?: DeviceConfig): Promise<string>;
@@ -1240,7 +1283,12 @@ export declare function createNewStore(phoneNumber: string, opts?: {
   simMnc?: string;
 }): WhalibmobStore;
 /** What the CLI uses for every new SMS session; prefer it over `createNewStore`. */
-export declare function initAuthCreds(phoneNumber: string, opts?: { name?: string }): WhalibmobStore;
+export declare function initAuthCreds(phoneNumber: string, opts?: {
+  name?: string;
+  registered?: boolean;
+  simMcc?: string;
+  simMnc?: string;
+}): WhalibmobStore;
 export declare function saveStore(store: WhalibmobStore, filePath: string): void;
 export declare function loadStore(filePath: string): WhalibmobStore | null;
 export declare function storeToJson(store: WhalibmobStore): string;

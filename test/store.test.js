@@ -199,3 +199,66 @@ test('fromSixParts tolerates whitespace and rejects the wrong shape', () => {
   assert.throws(() => fromSixParts('a,b,c'), /expected 6/);
   assert.throws(() => fromSixParts(six + ',extra'), /expected 6/);
 });
+
+// ── registration transaction state ─────────────────────────────────────────
+
+test('registration access id and normalized guidance survive a round-trip', () => {
+  const original = createNewStore(PHONE);
+  assert.match(original._accessSessionId, /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(original.registrationState, null);
+
+  original.registrationState = {
+    version: 1,
+    accessSessionId: original._accessSessionId,
+    checkedAt: 1700000000000,
+    preflight: 'fresh',
+    eligibility: { wa_old: false, send_sms: true, ignored: true },
+    retryAt: { sms: 1700003600000, ignored: 1 },
+    recommendedMethod: 'sms',
+    fallbackMethods: ['voice']
+  };
+
+  const back = storeFromJson(storeToJson(original));
+  assert.equal(back._accessSessionId, original._accessSessionId);
+  assert.deepEqual(back.registrationState, {
+    version: 1,
+    accessSessionId: original._accessSessionId,
+    checkedAt: 1700000000000,
+    preflight: 'fresh',
+    eligibility: { wa_old: false, send_sms: true },
+    retryAt: { sms: 1700003600000 },
+    recommendedMethod: 'sms',
+    fallbackMethods: ['voice']
+  });
+});
+
+test('a legacy or invalid access id clears pending code and registration guidance', () => {
+  const original = createNewStore(PHONE);
+  const json = storeToJson(original);
+  json._accessSessionId = 'not-a-valid-id';
+  json.codePending = true;
+  json.codeMethod = 'sms';
+  json.registrationState = {
+    version: 1,
+    accessSessionId: original._accessSessionId,
+    checkedAt: Date.now(),
+    preflight: 'fresh',
+    eligibility: { wa_old: true },
+    retryAt: { sms: Date.now() + 60000 }
+  };
+
+  const back = storeFromJson(json);
+  assert.match(back._accessSessionId, /^[A-Za-z0-9_-]{22}$/);
+  assert.notEqual(back._accessSessionId, json._accessSessionId);
+  assert.equal(back.codePending, false);
+  assert.equal(back.codeMethod, null);
+  assert.equal(back.registrationState, null);
+});
+
+
+test('createNewStore rejects malformed SIM network codes', () => {
+  assert.throws(() => createNewStore(PHONE, { simMcc: '72A' }), /exactly 3 digits/);
+  assert.throws(() => createNewStore(PHONE, { simMcc: '72' }), /exactly 3 digits/);
+  assert.throws(() => createNewStore(PHONE, { simMnc: '1' }), /2 or 3 digits/);
+  assert.throws(() => createNewStore(PHONE, { simMnc: '0001' }), /2 or 3 digits/);
+});

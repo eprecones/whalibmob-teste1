@@ -171,3 +171,30 @@ test('repeated pauses do not all come out the same length', async () => {
     assert.ok(draws.size > 1, 'a fixed delay is its own fingerprint');
   });
 });
+
+// ─── server cooldown hints ─────────────────────────────────────────────────
+
+const { waitHint } = Registration._verify;
+
+test('waitHint prefers the requested delivery method', () => {
+  assert.equal(waitHint({ sms_wait: 15, voice_wait: 90 }, 'sms'), 15);
+  assert.equal(waitHint({ sms_wait: 15, voice_wait: 90 }, 'voice'), 90);
+});
+
+test('waitHint understands wa_old, email and send_sms aliases', () => {
+  assert.equal(waitHint({ wa_old_wait: '3600' }, 'wa_old'), 3600);
+  assert.equal(waitHint({ email_otp_wait: 75 }, 'email'), 75);
+  assert.equal(waitHint({ send_sms_wait: 45 }, 'sms'), 45);
+});
+
+test('waitHint falls back to the largest method wait, then retry_after', () => {
+  assert.equal(waitHint({ sms_wait: 10, voice_wait: 20 }, 'flash'), 20);
+  assert.equal(waitHint({ retry_after: 120 }, 'sms'), 120);
+  assert.equal(waitHint({}, 'sms'), null);
+});
+
+
+test('sms aliases report the same longest wait that is persisted', () => {
+  assert.equal(waitHint({ sms_wait: 10, send_sms_wait: 90 }, 'sms'), 90);
+  assert.equal(waitHint({ sms_wait: 90, send_sms_wait: 10 }, 'sms'), 90);
+});

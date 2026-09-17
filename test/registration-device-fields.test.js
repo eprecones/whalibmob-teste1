@@ -237,3 +237,13 @@ test('an unknown country still gets a shape the server can parse', () => {
     assert.equal(meta.mnc, '000');
   });
 });
+
+
+test('malformed SIM overrides are rejected before they reach the wire', () => {
+  withEnv({ WA_SIM_MCC: '72A', WA_SIM_MNC: undefined }, () => {
+    assert.throws(() => getCountryMeta('40'), /MCC must be exactly 3 digits/);
+  });
+  withEnv({ WA_SIM_MCC: undefined, WA_SIM_MNC: '1' }, () => {
+    assert.throws(() => getCountryMeta('40'), /MNC must be 2 or 3 digits/);
+  });
+});

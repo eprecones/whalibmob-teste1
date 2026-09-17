@@ -7,11 +7,10 @@ attestation and iOS App Attest).
 
 
 > folder. They are reference material — kept here so whalibmob users who own a
-> rooted Android phone or a jailbroken iPhone can reproduce the same
-> device-bound attestation the native app produces. They are **not** required
-> for basic registration: without them whalibmob ships the same empty
-> low-trust attestation fields the native client sends when integrity minting
-> fails, which the server tolerates.
+> rooted Android phone or a jailbroken iPhone can study the integration. They
+> are **not** required for the ordinary request path: without them, unavailable
+> attestation fields are omitted. Whether an unattested or partially attested
+> registration is accepted remains server policy.
 
 ## Layout
 

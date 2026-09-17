@@ -248,7 +248,7 @@ npm install -g whalibmob
     - [Lendo Alterações Feitas em Outro Lugar](#lendo-alterações-feitas-em-outro-lugar)
     - [Mensagens Temporárias](#mensagens-temporárias)
   - [Consultas de Usuário](#consultas-de-usuário)
-    - [Verificar se um Número Tem WhatsApp](#verificar-se-um-número-tem-whatsapp)
+    - [Preflight de uma Identidade de Registro](#preflight-de-uma-identidade-de-registro)
     - [Buscar o Recado do Perfil](#buscar-o-recado-do-perfil)
     - [Buscar a Foto de Perfil](#buscar-a-foto-de-perfil)
     - [Assinar a Presença](#assinar-a-presença)
@@ -334,7 +334,17 @@ O registro é um processo feito uma única vez. Você precisa de um número de t
 
 **Passo 1 — solicite um código de verificação**
 
+Escolha a plataforma no próprio comando. `--platform` vence `WA_OS` apenas
+nesse processo e vale quando uma sessão nova é criada; uma sessão já salva
+nunca troca de plataforma silenciosamente.
+
 ```sh
+# iPhone / iOS consumer
+wa registration --request-code 919634847671 --platform iphone
+
+# Android consumer
+wa registration --request-code 919634847671 --platform android
+
 # via SMS (default)
 wa registration --request-code 919634847671
 
@@ -368,10 +378,9 @@ Três coisas para saber antes de escolher esse método:
 - **Somente Android.** O iOS não tem API para ler o número de uma chamada recebida, então
   o WhatsApp nunca oferece flash call lá. Pedir flash call como iOS é recusado antes que qualquer
   requisição saia, então o número não gasta nenhuma tentativa para descobrir isso.
-- **O servidor decide.** A flash call não é oferecida para todo número ou país. Quando
-  ela é recusada, a solicitação cai automaticamente para SMS e a sessão
-  registra isso, para que o código SMS seja confirmado como um código SMS em vez de ser
-  cortado como um identificador de chamadas.
+- **O servidor decide.** A flash call não é oferecida para todo número ou país.
+  Uma recusa volta sem alterações; a biblioteca nunca gasta uma segunda tentativa
+  de entrega, salvo se o chamador passar explicitamente `allowMethodFallback: true`.
 - **O identificador de chamadas precisa estar visível.** Uma operadora que oculta o número de origem
   não deixa nada para ser lido.
 
@@ -460,20 +469,23 @@ registered  session saved to /home/user/.waSession/919634847671/919634847671.jso
 now run: /connect 919634847671
 ```
 
-**Verifique se um número já tem WhatsApp**
+**Faça o preflight da identidade de registro (não envia código)**
 
 ```sh
 wa registration --check 919634847671
 ```
 
-Saída:
+Esse comando chama `/exist` uma única vez para um novo conjunto de chaves
+locais. Ele **não** determina se um número arbitrário possui WhatsApp e nunca
+continua automaticamente para `/code`. O status é deliberadamente:
 
 ```
-checking +919634847671...
-  status  registered
+status  registration_identity_preflight
 ```
 
-Status possíveis: `registered` · `registered_blocked` · `not_registered` · `cooldown` · `unknown`
+Na API JavaScript, examine `preflight.status`, `preflight.reason` e
+`preflight.param`. Para consultar contatos enquanto já estiver conectado, use
+`client.hasWhatsapp()`.
 
 ### CLI Conectar
 
@@ -1754,7 +1766,7 @@ O registro é um processo feito uma única vez. Você precisa de um número de t
 
 ```js
 const {
-  createNewStore, saveStore, requestSmsCode
+  createNewStore, saveStore, checkIfRegistered, requestSmsCode
 } = require('whalibmob')
 const path = require('path')
 const fs   = require('fs')
@@ -1771,8 +1783,36 @@ fs.mkdirSync(sessDir, { recursive: true })
 const store = createNewStore(phone, { name: 'Ricardo Trade' })
 saveStore(store, sessFile)
 
-await requestSmsCode(store, 'sms')   // 'sms' | 'voice' | 'wa_old'
+// Um preflight /exist confirma que estas chaves exatas são novas e grava
+// elegibilidade/cooldowns de entrega na Store. Persista até em caso de recusa.
+const preflight = await checkIfRegistered(store)
+saveStore(store, sessFile)
+if (preflight.reason !== 'incorrect') {
+  throw new Error('o preflight de registro não aceitou estas chaves')
+}
+
+const codeResult = await requestSmsCode(store, 'sms')
+saveStore(store, sessFile)
+if (codeResult.status !== 'sent' && codeResult.status !== 'ok') {
+  // Não há código pendente. Examine reason, wait_seconds e retry_at; não repita
+  // automaticamente.
+  throw new Error(codeResult.reason || 'a entrega do código não foi aceita')
+}
 ```
+
+Uma chamada agora produz exatamente uma requisição `/code` por padrão. Respostas
+desconhecidas voltam sem repetição, e `no_routes` não troca silenciosamente de
+canal. Se uma aplicação quiser deliberadamente essas tentativas externas extras,
+precisa optar por `retryUnknown: true` ou `allowMethodFallback: true`.
+
+As chamadas `/exist`, `/code` e `/register` precisam usar a mesma Store: ela
+carrega um `access_session_id` estável, a versão que pediu o código e o
+`registrationState` normalizado. `wa_old` só é permitido quando `/exist` retorna
+explicitamente `wa_old_eligible=1`; caso contrário `requestSmsCode()` devolve
+uma falha local `wa_old_not_eligible` ou `wa_old_eligibility_unknown`, sem falar
+com o servidor. Uma espera do servidor volta como `wait_seconds` mais o timestamp
+absoluto `retry_at` e é persistida. Pedir novamente antes desse instante retorna
+`cooldown_active` com `local: true`, também sem requisição.
 
 O nome é gravado na sessão, e não enviado ao endpoint de registro — o
 servidor o descobre na primeira conexão, e em todas as seguintes. Ele também pode
@@ -1843,7 +1883,7 @@ const result = await verifyCode(store, '123456', {
 Os dois são opcionais e os dois continuam funcionando quando omitidos — você recebe um erro nomeando o que foi pedido, em vez de uma falha silenciosa, com os blobs do CAPTCHA anexados em `err.captcha`. Uma resposta errada de CAPTCHA é respondida com outro CAPTCHA, então o `solveCaptcha` pode ser chamado várias vezes. A CLI pergunta pelos dois, gravando a imagem em um arquivo temporário primeiro.
 
 > [!NOTE]
-> O registro reporta as telas pelas quais passa ao `/client_log` do WhatsApp, do jeito que os clientes de celular fazem — um cliente que registra em silêncio total faz algo que nenhuma instalação real faz. É "dispare e esqueça" e toda falha é engolida, então isso nunca pode derrubar um registro. Defina `WA_FUNNEL_LOG=0` para não enviar nada disso.
+> A telemetria do funil é um efeito externo separado e fica **desligada por padrão**. Defina `WA_FUNNEL_LOG=1` somente quando quiser explicitamente eventos `/client_log` além do endpoint de registro solicitado; falhas continuam sendo ignoradas.
 
 > [!NOTE]
 > Esses eventos carregam horários, e o registro espera entre eles como uma pessoa esperaria: alguns segundos para digitar o número, um momento na tela de confirmação, mais tempo antes de pedir de novo depois de uma recusa. Sem as esperas o funil inteiro sai dentro de um milissegundo, o que nenhum aparelho faz. Isso acrescenta alguns segundos a um registro. Defina `WA_REG_PACING=0` para removê-las.
@@ -1987,11 +2027,20 @@ adb pull /data/app/~~xyz==/com.whatsapp-abc==/split_config.xxhdpi.apk
 Os lançamentos recentes vêm como App Bundle, então o `about_logo.png` muitas vezes fica em um
 split de densidade em vez de no `base.apk`. Extraia também os arquivos `split_config.*dpi.apk`
 e passe-os junto — só os splits cujo nome termina em `dpi` são vasculhados.
+Quando você passar mais de um split de densidade, passe também a densidade do
+aparelho obtida com `adb shell wm density` (por exemplo `--density 420`) ou um
+bucket como `--density xxhdpi`. O comando recusa um bundle completo ambíguo em
+vez de deixar a ordem do ZIP/entrada escolher material criptográfico
+silenciosamente. Downloads da Play fornecem a densidade do perfil automaticamente.
 
 **Leia o material dele:**
 
 ```sh
+# Um split é inequívoco:
 wa apk-material base.apk split_config.xxhdpi.apk
+
+# Vários splits exigem a densidade da instalação:
+wa apk-material base.apk split_config.*dpi.apk --density 420
 ```
 
 ```
@@ -2022,8 +2071,9 @@ e `WA_ANDROID_APK_MATERIAL` aponta para ele se você o guardar em outro lugar.
 e anunciada daí em diante, em vez da versão que a Play
 Store lista no momento. O token é assinado sobre o `classes.dex` *desta* build, então
 anunciar qualquer outra versão descreve uma build à qual o token não pertence.
-`WA_VERSION` ainda sobrescreve tudo se você precisar; em um manifest sem
-`versionName`, passe `--version <x.y.z.w>`.
+`WA_VERSION` continua sendo uma sobrescrita da conexão, mas o registro Android
+agora a recusa quando conflita com o material do APK. Em um manifest sem
+`versionName`, passe `--version <x.y.z.w>` ao extrair o material.
 
 **Atualize o material a cada novo lançamento do WhatsApp.** O `classes.dex` muda a cada lançamento e
 o MD5 dele é assinado dentro do token, então material de uma build mais antiga deixa de bater com
@@ -2035,9 +2085,14 @@ Programaticamente:
 ```js
 const { extractMaterial, computeToken, materialToJson } = require('whalibmob/lib/AndroidApk')
 
+const densitySplits = ['mdpi', 'xxhdpi', 'xxxhdpi'].map(density => ({
+  name: `split_config.${density}.apk`,
+  data: fs.readFileSync(`split_config.${density}.apk`)
+}))
 const material = extractMaterial(
   fs.readFileSync('base.apk'),
-  [{ name: 'split_config.xxhdpi.apk', data: fs.readFileSync('split_config.xxhdpi.apk') }]
+  densitySplits,
+  { densityDpi: 420 }
 )
 fs.writeFileSync('android-apk-material.json', JSON.stringify(materialToJson(material)))
 ```
@@ -2051,11 +2106,12 @@ Android, **App Attest** no iOS. O whalibmob envia esses campos em toda requisiç
 mas só consegue preenchê-los com valores reais se conseguir falar com um dispositivo
 de verdade.
 
-Este repositório traz uma **pasta `frida/`** contendo os scripts que rodam no dispositivo e
-produzem esses tokens. Ela é totalmente **opcional**: sem nenhum dispositivo conectado,
-o whalibmob envia os mesmos campos de atestação vazios que um celular real envia quando sua
-verificação de integridade falha, e o registro continua funcionando. Conectar um dispositivo eleva a
-pontuação de confiança, o que ajuda quando você fica esbarrando em `no_routes` ou em telas de bloqueio.
+Este repositório traz uma **pasta `frida/`** com scripts de referência que rodam
+no dispositivo e podem produzir esses valores. Ela é totalmente **opcional**:
+sem a ponte do dispositivo, o whalibmob omite os campos de atestação
+indisponíveis em vez de enviar valores vazios no formulário. A requisição de
+registro ainda é feita, mas a aceitação é política do servidor; conectar esse
+helper de referência não garante que `no_routes` ou uma tela de bloqueio mudem.
 
 > Requer um **celular Android com root** ou um **iPhone com jailbreak** com o app oficial do
 > WhatsApp instalado a partir da Play Store / App Store. APKs instalados por sideload não
@@ -2771,7 +2827,7 @@ Ele abre o listener, espera até estar autenticado, solicita o código e confirm
 A conexão carrega um heartbeat e lembra os ids de mensagem que já viu, então uma reconexão não relê um código já entregue, do jeito que o cliente nativo faz. Ela resolve `null` em timeout, login recusado ou qualquer falha — momento em que você simplesmente lê o código do jeito comum e o verifica. Como o token, ela também passa pelo proxy SOCKS configurado.
 
 > [!IMPORTANT]
-> Receber o push não é a mesma coisa que fazer o WhatsApp enviá-lo. Se o WhatsApp envia ou não o código por push em uma dada requisição é decisão do servidor, e em um cliente que envia atestação vazia ele frequentemente manda o código apenas pelo método que você pediu (SMS, `wa_old`, uma chamada) e nenhum push silencioso. Este listener captura o push corretamente **quando um é enviado**; ele não pode forçar esse canal, e nunca substitui o método escolhido — ele roda ao lado dele. Com uma atestação válida do Play Integrity na requisição (`WA_FRIDA_HOST`), é mais provável que o servidor inclua o push silencioso.
+> Receber o push não é a mesma coisa que fazer o WhatsApp enviá-lo. Se o WhatsApp envia ou não o código por push em uma dada requisição é decisão do servidor. Este listener captura o push corretamente **quando um é enviado**; ele não pode forçar esse canal, e nunca substitui o método escolhido — ele roda ao lado dele. Campos de atestação presentes ou ausentes podem fazer parte da política do servidor, mas este projeto não tem evidência controlada de que uma das condições cause o push silencioso.
 
 ## Roteando o Tráfego por um Proxy
 
@@ -4612,15 +4668,19 @@ await client.changeEphemeralTimer('919634847671', 0)
 
 ## Consultas de Usuário
 
-### Verificar se um Número Tem WhatsApp
+### Preflight de uma Identidade de Registro
 
 ```js
 const { checkNumberStatus } = require('whalibmob')
 
 const result = await checkNumberStatus('919634847671')
-// result.status: 'registered' | 'registered_blocked' | 'not_registered' | 'cooldown' | 'unknown'
-console.log(result.status)
+console.log(result.status)             // 'registration_identity_preflight'
+console.log(result.preflight.reason)   // por exemplo, o reason bruto de /exist
 ```
+
+Apesar do nome legado, `checkNumberStatus()` não é uma consulta pública de
+existência de conta. Ele faz uma requisição `/exist` para uma nova identidade
+local de registro e nunca solicita código de verificação.
 
 Verifique vários números de uma vez enquanto estiver conectado:
 
@@ -5700,6 +5760,12 @@ Então diga qual SIM está no aparelho:
 const store = createNewStore('5511999999999', { simMcc: '724', simMnc: '05' })
 ```
 
+A CLI aceita os mesmos valores ao criar uma Store nova de registro:
+
+```sh
+wa registration --request-code <phone> --sim-mcc 724 --sim-mnc 05
+```
+
 | Variável | Descrição |
 |---|---|
 | `WA_SIM_MCC` | Código de país móvel do SIM (ex.: `724`) |
@@ -5713,7 +5779,7 @@ ambas sem definir e nada muda em relação a antes.
 
 | Variável | Descrição |
 |---|---|
-| `WA_VERSION` | Fixa a versão do WhatsApp (ex.: `2.24.13.80`). Pula a busca ao vivo na loja, e é anunciada na conexão **no lugar da versão armazenada na sessão**. A CLI também a lê de um arquivo `.env` no diretório de trabalho, então uma deixada ali é anunciada por toda conexão feita a partir daquele diretório — que é como uma sessão funcional começa a ser recusada com [405](#quando-o-servidor-responde-405-na-conexão). Fixe-a deliberadamente e remova-a quando terminar. |
+| `WA_VERSION` | Fixa a versão do WhatsApp (ex.: `2.24.13.80`). Pula a busca ao vivo na loja, e é anunciada na conexão **no lugar da versão armazenada na sessão**. Durante o registro Android, o material do APK é a autoridade e um valor fixado conflitante é recusado antes de `/exist`. A CLI também a lê de um arquivo `.env` no diretório de trabalho, então uma deixada ali é anunciada por toda conexão feita a partir daquele diretório — que é como uma sessão funcional começa a ser recusada com [405](#quando-o-servidor-responde-405-na-conexão). Fixe-a deliberadamente e remova-a quando terminar. |
 | `WA_STATIC_TOKEN` | Sobrescreve o token estático usado no cálculo do token de registro. Somente iOS — o Android não tem token estático. Sobrescreve tanto a constante do consumidor quanto a do Business. |
 | `WA_BUSINESS` | Registra e conecta como WhatsApp Business (`1`/`true`/`yes`/`on`). Decide a plataforma anunciada, o User-Agent, de qual APK vem o material do token, e o certificado `vname`. Veja [Registrando uma conta WhatsApp Business](#registrando-uma-conta-whatsapp-business). |
 
